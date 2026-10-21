@@ -5,7 +5,7 @@ from __future__ import annotations
 import html
 import json
 from datetime import datetime, timezone
-from typing import List
+from typing import List, Optional
 
 from .graph import Graph
 
@@ -49,12 +49,16 @@ def _color_index(graph: Graph) -> dict:
     return color_of
 
 
+def _format_date(commit) -> str:
+    if not commit.timestamp:
+        return ""
+    return datetime.fromtimestamp(commit.timestamp, tz=timezone.utc).strftime(
+        "%Y-%m-%d %H:%M:%S UTC"
+    )
+
+
 def _tooltip(commit, refs) -> str:
-    when = ""
-    if commit.timestamp:
-        when = datetime.fromtimestamp(commit.timestamp, tz=timezone.utc).strftime(
-            "%Y-%m-%d %H:%M:%S UTC"
-        )
+    when = _format_date(commit)
     rows = [
         "<div class='tt-sha'>%s</div>" % html.escape(commit.sha),
         "<div class='tt-subject'>%s</div>"
@@ -76,7 +80,7 @@ def _tooltip(commit, refs) -> str:
     return "".join(rows)
 
 
-def _build_payload(graph: Graph) -> dict:
+def _build_payload(graph: Graph, changes: Optional[dict] = None) -> dict:
     nodes: List[dict] = []
     edges: List[dict] = []
     color_of = _color_index(graph)
@@ -114,7 +118,11 @@ def _build_payload(graph: Graph) -> dict:
             "_remoteOnly": sha in graph.remote_only,
             "_subject": commit.subject,
             "_author": commit.author,
+            "_email": commit.author_email,
+            "_date": _format_date(commit),
+            "_message": commit.message,
             "_sha": sha,
+            "_changes": (changes or {}).get(sha, []),
         }
         nodes.append(node)
 
@@ -194,8 +202,13 @@ def _build_payload(graph: Graph) -> dict:
     }
 
 
-def render_html(graph: Graph, out_path: str, title: str = "git graph") -> str:
-    payload = _build_payload(graph)
+def render_html(
+    graph: Graph,
+    out_path: str,
+    title: str = "git graph",
+    changes: Optional[dict] = None,
+) -> str:
+    payload = _build_payload(graph, changes)
     data_json = json.dumps(payload, ensure_ascii=False).replace("</", "<\\/")
     generated = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -260,6 +273,51 @@ _TEMPLATE = """<!DOCTYPE html>
   .vis-tooltip .badge.branch { background: #8ab4f8; }
   .vis-tooltip .badge.remote { background: #f8b88a; }
   .vis-tooltip .badge.tag { background: #b6f88a; }
+  #details {
+    position: fixed; top: 0; right: 0; height: 100%; width: 480px; max-width: 92vw;
+    background: #fff; border-left: 1px solid #ddd; box-shadow: -6px 0 20px rgba(0,0,0,.12);
+    transform: translateX(100%); transition: transform .2s ease; z-index: 1000;
+    display: flex; flex-direction: column;
+  }
+  #details.open { transform: none; }
+  #details-body { overflow-y: auto; padding: 16px 16px 48px; }
+  #details h2 { font-size: 15px; margin: 4px 0 6px; padding-right: 60px; }
+  .d-close {
+    position: absolute; top: 10px; right: 12px; border: none; background: #f0f0f0;
+    border-radius: 6px; padding: 3px 9px; cursor: pointer; font-size: 12px; z-index: 1;
+  }
+  .d-sha { font-family: monospace; color: #4e79a7; font-size: 12px; word-break: break-all; }
+  .d-meta { color: #666; font-size: 12px; margin-top: 2px; }
+  pre.d-msg {
+    background: #f7f7f7; border: 1px solid #eee; border-radius: 6px; padding: 8px 10px;
+    font-size: 12px; white-space: pre-wrap; word-break: break-word; margin: 10px 0;
+  }
+  .file {
+    display: flex; align-items: center; gap: 8px; padding: 5px 6px; cursor: pointer;
+    border-bottom: 1px solid #f0f0f0; font-size: 12.5px;
+  }
+  .file:hover { background: #f7f7f7; }
+  .file .path { flex: 1; word-break: break-all; font-family: monospace; }
+  .file .status {
+    width: 16px; height: 16px; border-radius: 4px; text-align: center; line-height: 16px;
+    font-size: 11px; font-weight: 700; color: #fff; flex: none;
+  }
+  .status.added { background: #2ca02c; }
+  .status.deleted { background: #d62728; }
+  .status.modified { background: #f28e2b; }
+  .status.submodule { background: #9467bd; }
+  .file .stat-add { color: #2ca02c; font-size: 11px; }
+  .file .stat-del { color: #d62728; font-size: 11px; }
+  pre.diff {
+    margin: 0 0 8px; background: #1e1e1e; color: #ddd; border-radius: 6px; padding: 8px 10px;
+    font-size: 11.5px; line-height: 1.45; overflow-x: auto; white-space: pre;
+  }
+  pre.diff .dl { display: block; }
+  pre.diff .dl.add { color: #8ce99a; }
+  pre.diff .dl.del { color: #ffa8a8; }
+  pre.diff .dl.hunk { color: #74c0fc; }
+  pre.diff .dl.meta { color: #adb5bd; }
+  .d-empty { color: #999; font-size: 12.5px; }
 </style>
 </head>
 <body>
@@ -275,6 +333,10 @@ _TEMPLATE = """<!DOCTYPE html>
     <ul class="reflist" id="reflist"></ul>
   </aside>
   <div id="graph"></div>
+  <aside id="details">
+    <button class="d-close" id="details-close">close</button>
+    <div id="details-body"></div>
+  </aside>
 </div>
 <script>
 const DATA = __DATA__;
@@ -373,6 +435,71 @@ search.addEventListener('input', () => {
              color: hit ? { background: '#ff2d55', border: '#ff2d55' } : n.color };
   });
   nodes.update(updates);
+});
+
+// Commit details: click a commit to see when it happened, its full message and
+// the files it changed against its first parent. Click a file to unfold the
+// exact unified diff.
+const detailsEl = document.getElementById('details');
+const detailsBody = document.getElementById('details-body');
+const nodeById = new Map(DATA.nodes.map(n => [n.id, n]));
+
+function esc(value) {
+  return String(value == null ? '' : value)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+function diffHtml(text) {
+  if (!text) return '<span class="dl meta">(no textual diff)</span>';
+  return text.split('\\n').map(line => {
+    let cls = 'ctx';
+    if (line.startsWith('@@')) cls = 'hunk';
+    else if (line.startsWith('+++') || line.startsWith('---')) cls = 'meta';
+    else if (line.startsWith('+')) cls = 'add';
+    else if (line.startsWith('-')) cls = 'del';
+    return '<span class="dl ' + cls + '">' + (esc(line) || '&nbsp;') + '</span>';
+  }).join('');
+}
+
+function showDetails(id) {
+  const n = nodeById.get(id);
+  if (!n || n._dummy) return;
+  const files = n._changes || [];
+  let h = '<h2>' + esc(n._subject || '(no message)') + '</h2>';
+  h += '<div class="d-sha">' + esc(n._sha) + '</div>';
+  h += '<div class="d-meta">' + esc(n._author) + ' &lt;' + esc(n._email) + '&gt;</div>';
+  h += '<div class="d-meta">' + esc(n._date) + '</div>';
+  if (n._message) h += '<pre class="d-msg">' + esc(n._message) + '</pre>';
+  h += '<div class="section-title">' + files.length + ' file(s) changed vs parent</div>';
+  if (!files.length) {
+    h += '<div class="d-empty">no file changes (or details disabled)</div>';
+  }
+  files.forEach((f, i) => {
+    const stat = f.binary
+      ? '<span class="stat-add">binary</span>'
+      : '<span class="stat-add">+' + f.insertions + '</span> '
+        + '<span class="stat-del">-' + f.deletions + '</span>';
+    h += '<div class="file" data-i="' + i + '">'
+      + '<span class="status ' + f.status + '">' + f.status.charAt(0).toUpperCase() + '</span>'
+      + '<span class="path">' + esc(f.path) + '</span>' + stat + '</div>';
+    h += '<pre class="diff" id="diff-' + i + '" hidden>' + diffHtml(f.diff) + '</pre>';
+  });
+  detailsBody.innerHTML = h;
+  detailsEl.classList.add('open');
+}
+
+detailsBody.addEventListener('click', e => {
+  const file = e.target.closest('.file');
+  if (file) {
+    const pre = document.getElementById('diff-' + file.dataset.i);
+    if (pre) pre.hidden = !pre.hidden;
+  }
+});
+document.getElementById('details-close').addEventListener('click', () =>
+  detailsEl.classList.remove('open'));
+
+network.on('click', params => {
+  if (params.nodes && params.nodes.length) showDetails(params.nodes[0]);
 });
 </script>
 </body>

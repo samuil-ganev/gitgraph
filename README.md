@@ -25,6 +25,9 @@ self-contained HTML file that opens in your browser.
 - Interactive HTML: zoom, pan, hover tooltips (sha, author, date, subject),
   clickable ref list, live search, "fit all", a **hide/show origin** toggle
   (hides remote-only commits and remote labels) and HEAD highlighting.
+- Click a commit to open a details panel: its full message, author and date,
+  plus the list of files changed against its first parent; click a file to
+  unfold the exact unified diff (computed with the standard library only).
 
 ## Usage
 
@@ -54,6 +57,7 @@ pip install -e . && gitgraph /path/to/repo
 | `-o, --out FILE` | output HTML file (default: `<repo>/gitgraph.html`) |
 | `--no-open` | do not open the browser |
 | `--title TEXT` | page title |
+| `--no-details` | skip per-commit file changes and diffs (faster, smaller output) |
 
 The output file is overwritten on every run, so re-running always shows the
 current tree.
@@ -61,21 +65,26 @@ current tree.
 ## Library
 
 ```python
-from gitgraph import Repo, build_graph, render_html
+from gitgraph import Repo, build_graph, collect_changes, render_html
 
-repo = Repo(".")              # discovers the .git directory
-graph = build_graph(repo)     # commits, parents, lanes, ref labels
+repo = Repo(".")                     # discovers the .git directory
+graph = build_graph(repo)            # commits, parents, lanes, ref labels
 print(graph.num_commits, repo.current_branch())
 
-render_html(graph, "gitgraph.html")
+changes = collect_changes(repo, graph)   # {sha: [file change dicts]}
+render_html(graph, "gitgraph.html", changes=changes)
 ```
 
 Key types:
 
 - `Repo` — `.git` discovery, refs, HEAD, commit parsing (`repo.reader` exposes
   raw object access: `repo.reader.read(sha) -> (type, bytes)`).
-- `Graph` — `commits`, `order` (newest first), `lanes`, `rows`, `labels`.
-- `render_html(graph, path, title)` — writes the interactive page.
+- `Graph` — `commits`, `order` (newest first), `layers`, `slots`, `labels`,
+  plus `edges` and `dummies` (invisible routing vertices that keep long edges
+  from crossing commits).
+- `collect_changes(repo, graph)` — per-commit file changes against the first
+  parent (`FileChange`: path, status, insertions, deletions, binary, diff).
+- `render_html(graph, path, title, changes=None)` — writes the interactive page.
 
 ## Tests
 

@@ -8,6 +8,7 @@ import sys
 import webbrowser
 from typing import List, Optional
 
+from .diff import collect_changes
 from .graph import build_graph
 from .render_html import render_html
 from .repo import Repo
@@ -34,6 +35,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         "--no-open", action="store_true", help="do not open the browser"
     )
     parser.add_argument("--title", default=None, help="page title")
+    parser.add_argument(
+        "--no-details",
+        action="store_true",
+        help="skip per-commit file changes and diffs (faster, smaller output)",
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -45,7 +51,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     graph = build_graph(repo)
     out_path = args.out or _default_output(repo)
     title = args.title or ("git graph - %s" % (repo.workdir or repo.git_dir))
-    render_html(graph, out_path, title)
+    changes = None if args.no_details else collect_changes(repo, graph)
+    render_html(graph, out_path, title, changes=changes)
 
     branches = sum(1 for r in repo.refs if r.kind == "branch")
     remotes = sum(1 for r in repo.refs if r.kind == "remote")

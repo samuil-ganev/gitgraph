@@ -8,6 +8,7 @@ self-contained interactive HTML visualisation.
 from .objects import GitObjectError, ObjectReader
 from .repo import Commit, Ref, Repo, find_git_dir
 from .graph import Graph, build_graph
+from .diff import FileChange, collect_changes
 from .render_html import render_html
 
 __all__ = [
@@ -19,6 +20,8 @@ __all__ = [
     "find_git_dir",
     "Graph",
     "build_graph",
+    "FileChange",
+    "collect_changes",
     "render_html",
 ]
 
