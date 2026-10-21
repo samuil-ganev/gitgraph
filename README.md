@@ -17,9 +17,11 @@ self-contained HTML file that opens in your browser.
 - Builds the complete acyclic commit graph from all ref tips.
 - Lays the graph out **horizontally as a proper layered DAG** (Sugiyama style):
   vertices are ranked by the longest path from a source, so every edge goes
-  strictly from a lower layer to a higher layer; barycenter sweeps reduce edge
-  crossings; vertices are stacked inside each layer. Newest commits are on the
-  left, root commits on the right, and every edge points child -> parent.
+  strictly from a lower layer to a higher layer; long edges are split with
+  dummy routing vertices so a connection never cuts through an unrelated
+  commit; barycenter sweeps reduce edge crossings; vertices are stacked inside
+  each layer. Newest commits are on the left, root commits on the right, and
+  every edge points child -> parent.
 - Interactive HTML: zoom, pan, hover tooltips (sha, author, date, subject),
   clickable ref list, live search, "fit all", a **hide/show origin** toggle
   (hides remote-only commits and remote labels) and HEAD highlighting.

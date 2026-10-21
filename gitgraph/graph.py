@@ -4,8 +4,11 @@ The layout follows the classical (Sugiyama style) approach for drawing a DAG:
 
 1. rank every vertex into a layer using the longest path from a source, so that
    every directed edge goes from a lower layer to a higher layer;
-2. reduce edge crossings by a few barycenter sweeps within each layer;
-3. stack vertices inside each layer.
+2. break long edges (spanning more than one layer) with dummy vertices so that
+   every drawn edge only connects two adjacent layers -- otherwise the curve
+   would cut straight through the commits sitting in the layers in between;
+3. reduce edge crossings by a few barycenter sweeps within each layer;
+4. stack vertices inside each layer.
 
 Because git stores each commit with a pointer to its parent(s), the natural
 direction of an edge is ``child -> parent``. Sources (no incoming edges) are the
@@ -16,9 +19,29 @@ from __future__ import annotations
 
 import heapq
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 from .repo import Commit, Ref, Repo, parse_commit
+
+
+@dataclass
+class Dummy:
+    """A synthetic routing vertex on a long edge (not a real commit)."""
+
+    id: str
+    layer: int
+    slot: float = 0.0
+    remote_only: bool = False
+
+
+@dataclass
+class Edge:
+    """A drawn edge between two adjacent layers (real or dummy endpoints)."""
+
+    source: str  # child side
+    target: str  # parent side
+    terminal: bool  # True when ``target`` is a real commit (gets an arrow head)
+    remote_only: bool = False
 
 
 @dataclass
@@ -32,6 +55,9 @@ class Graph:
     labels: Dict[str, List[Ref]] = field(default_factory=dict)
     head_sha: Optional[str] = None
     head_ref: Optional[str] = None
+    edges: List[Edge] = field(default_factory=list)
+    dummies: Dict[str, Dummy] = field(default_factory=dict)
+    remote_only: Set[str] = field(default_factory=set)
 
     @property
     def num_commits(self) -> int:
@@ -107,6 +133,23 @@ def _children_map(commits: Dict[str, Commit]) -> Dict[str, List[str]]:
     return children
 
 
+def _local_reachable(
+    commits: Dict[str, Commit], refs: List[Ref], head_sha: Optional[str]
+) -> Set[str]:
+    """Commits reachable without any remote branch (branches, tags and HEAD)."""
+    reachable: Set[str] = set()
+    stack = [r.sha for r in refs if r.kind in ("branch", "tag")]
+    if head_sha:
+        stack.append(head_sha)
+    while stack:
+        sha = stack.pop()
+        if sha in reachable or sha not in commits:
+            continue
+        reachable.add(sha)
+        stack.extend(commits[sha].parents)
+    return reachable
+
+
 def _assign_layers(order: List[str], children: Dict[str, List[str]]) -> Dict[str, int]:
     """Longest-path layering: layer(v) = 0 if no children, else max(layer(c))+1.
 
@@ -120,6 +163,53 @@ def _assign_layers(order: List[str], children: Dict[str, List[str]]) -> Dict[str
     return layer
 
 
+def _expand(
+    commits: Dict[str, Commit],
+    layer: Dict[str, int],
+    remote_only: Set[str],
+) -> Tuple[
+    Dict[str, int],
+    Dict[str, List[str]],
+    Dict[str, List[str]],
+    List[Edge],
+    Dict[str, Dummy],
+]:
+    """Split every multi-layer edge into single-layer edges via dummy vertices.
+
+    Returns ``(node_layer, parents, children, edges, dummies)`` for the expanded
+    graph. Every edge then connects two adjacent layers, which is what keeps the
+    drawn curves from cutting through commits in the layers in between.
+    """
+    node_layer: Dict[str, int] = dict(layer)
+    edges: List[Edge] = []
+    dummies: Dict[str, Dummy] = {}
+
+    for sha in commits:
+        for parent in commits[sha].parents:
+            if parent not in commits:
+                continue
+            ro = sha in remote_only or parent in remote_only
+            span = layer[parent] - layer[sha]
+            prev = sha
+            for step in range(1, span):
+                did = "%s~%s~%d" % (sha, parent, step)
+                node_layer[did] = layer[sha] + step
+                dummies[did] = Dummy(
+                    id=did, layer=layer[sha] + step, remote_only=ro
+                )
+                edges.append(Edge(prev, did, terminal=False, remote_only=ro))
+                prev = did
+            edges.append(Edge(prev, parent, terminal=True, remote_only=ro))
+
+    parents: Dict[str, List[str]] = {}
+    children: Dict[str, List[str]] = {}
+    for edge in edges:
+        children.setdefault(edge.target, []).append(edge.source)
+        parents.setdefault(edge.source, []).append(edge.target)
+
+    return node_layer, parents, children, edges, dummies
+
+
 def _group_by_layer(order: List[str], layer: Dict[str, int]) -> Dict[int, List[str]]:
     groups: Dict[int, List[str]] = {}
     for sha in order:
@@ -130,12 +220,11 @@ def _group_by_layer(order: List[str], layer: Dict[str, int]) -> Dict[int, List[s
 def _reduce_crossings(
     groups: Dict[int, List[str]],
     children: Dict[str, List[str]],
-    commits: Dict[str, Commit],
+    parents: Dict[str, List[str]],
     layer: Dict[str, int],
     sweeps: int = 4,
 ) -> None:
     """Barycenter heuristic: reorder each layer by neighbour averages."""
-    parents = {sha: commit.parents for sha, commit in commits.items()}
     layer_ids = sorted(groups)
 
     def positions(layer_id: int) -> Dict[str, int]:
@@ -186,19 +275,33 @@ def build_graph(repo: Repo) -> Graph:
     order = _topological_order(commits)
     children = _children_map(commits)
     layer = _assign_layers(order, children)
-    groups = _group_by_layer(order, layer)
-    _reduce_crossings(groups, children, commits, layer)
+
+    reachable = _local_reachable(commits, repo.refs, repo.head_sha)
+    remote_only = {sha for sha in commits if sha not in reachable}
+
+    node_layer, parents, expanded_children, edges, dummies = _expand(
+        commits, layer, remote_only
+    )
+
+    groups = _group_by_layer(order + list(dummies), node_layer)
+    _reduce_crossings(groups, expanded_children, parents, node_layer)
     slots = _assign_slots(groups)
+
+    for dummy in dummies.values():
+        dummy.slot = slots.get(dummy.id, 0.0)
 
     graph = Graph(
         git_dir=repo.git_dir,
         commits=commits,
         order=order,
-        layers=layer,
-        slots=slots,
+        layers=dict(layer),
+        slots={sha: slots[sha] for sha in commits},
         refs=list(repo.refs),
         head_sha=repo.head_sha,
         head_ref=repo.head_ref,
+        edges=edges,
+        dummies=dummies,
+        remote_only=remote_only,
     )
 
     for ref in repo.refs:

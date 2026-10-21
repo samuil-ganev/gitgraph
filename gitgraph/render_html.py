@@ -81,19 +81,6 @@ def _build_payload(graph: Graph) -> dict:
     edges: List[dict] = []
     color_of = _color_index(graph)
 
-    # Commits reachable without any remote branch; everything else is
-    # "origin only" and can be hidden by the toggle in the UI.
-    local_reachable = set()
-    stack = [r.sha for r in graph.refs if r.kind in ("branch", "tag")]
-    if graph.head_sha:
-        stack.append(graph.head_sha)
-    while stack:
-        node_sha = stack.pop()
-        if node_sha in local_reachable or node_sha not in graph.commits:
-            continue
-        local_reachable.add(node_sha)
-        stack.extend(graph.commits[node_sha].parents)
-
     for sha in graph.order:
         commit = graph.commits[sha]
         refs = graph.refs_for(sha)
@@ -124,16 +111,50 @@ def _build_payload(graph: Graph) -> dict:
             "_refs": [r.short for r in refs],
             "_localRefs": [r.short for r in refs if r.kind != "remote"],
             "_remoteRefs": [r.short for r in refs if r.kind == "remote"],
-            "_remoteOnly": sha not in local_reachable,
+            "_remoteOnly": sha in graph.remote_only,
             "_subject": commit.subject,
             "_author": commit.author,
             "_sha": sha,
         }
         nodes.append(node)
 
-        for parent in commit.parents:
-            if parent in graph.commits:
-                edges.append({"from": sha, "to": parent})
+    # Invisible routing vertices: long edges are broken into single-layer
+    # segments, so no drawn curve cuts through a commit sitting in between.
+    for dummy in graph.dummies.values():
+        nodes.append(
+            {
+                "id": dummy.id,
+                "x": dummy.layer * X_SPACING,
+                "y": dummy.slot * Y_SPACING,
+                "label": "",
+                "title": "",
+                "shape": "dot",
+                "size": 0,
+                "color": {
+                    "background": "rgba(0,0,0,0)",
+                    "border": "rgba(0,0,0,0)",
+                },
+                "borderWidth": 0,
+                "font": {"size": 0},
+                "_refs": [],
+                "_localRefs": [],
+                "_remoteRefs": [],
+                "_remoteOnly": dummy.remote_only,
+                "_subject": "",
+                "_author": "",
+                "_sha": "",
+                "_dummy": True,
+            }
+        )
+
+    for edge in graph.edges:
+        edges.append(
+            {
+                "from": edge.source,
+                "to": edge.target,
+                "arrows": {"to": {"enabled": edge.terminal, "scaleFactor": 0.55}},
+            }
+        )
 
     refs_list = []
     for index, ref in enumerate(
@@ -275,7 +296,7 @@ const nodes = new vis.DataSet(DATA.nodes.map(n => ({
   font: n.font, fixed: true, physics: false,
 })));
 const edges = new vis.DataSet(DATA.edges.map((e, i) => ({
-  id: i, from: e.from, to: e.to,
+  id: i, from: e.from, to: e.to, arrows: e.arrows,
 })));
 
 const container = document.getElementById('graph');
@@ -284,7 +305,7 @@ const network = new vis.Network(container, { nodes, edges }, {
   layout: { improvedLayout: false },
   interaction: { hover: true, tooltipDelay: 120, navigationButtons: true, keyboard: true, multiselect: true },
   edges: {
-    arrows: { to: { enabled: true, scaleFactor: 0.55 } },
+    arrows: { to: { enabled: false } },
     color: { color: '#9aa0a6', highlight: '#111', opacity: 0.8 },
     smooth: { type: 'cubicBezier', forceDirection: 'horizontal', roundness: 0.35 },
     width: 1.3,
@@ -345,6 +366,7 @@ search.addEventListener('input', () => {
     return;
   }
   const updates = DATA.nodes.map(n => {
+    if (n._dummy) return { id: n.id };
     const hay = (n._sha + ' ' + n._subject + ' ' + n._author + ' ' + n._refs.join(' ')).toLowerCase();
     const hit = hay.includes(q);
     return { id: n.id, opacity: hit ? 1 : 0.15, borderWidth: hit ? 4 : n.borderWidth,
